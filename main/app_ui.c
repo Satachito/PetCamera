@@ -11,6 +11,8 @@
 #include "bsp/esp-bsp.h"
 
 #include "app_ui.h"
+#include "driver/jpeg_encode.h"
+#include "esp_heap_caps.h"
 #include "app_audio.h"
 #include "app_camera.h"
 #include "app_httpd.h"
@@ -42,6 +44,8 @@ static struct {
     lv_obj_t *qr;
     lv_obj_t *status_label;
     char      url[64];
+    char      status_text[64];
+    bool      status_dirty;
 } s_ui;
 
 /* The overlay sits on top of the live image, so it needs its own background to
@@ -230,6 +234,21 @@ static void refresh_task(void *arg)
             app_preview_refresh();
             update_recording_overlay();
 
+            if (s_ui.status_dirty) {
+                s_ui.status_dirty = false;
+                lv_label_set_text(s_ui.status_label, s_ui.status_text);
+                lv_obj_clear_flag(s_ui.status_label, LV_OBJ_FLAG_HIDDEN);
+                lv_obj_align(s_ui.status_label, LV_ALIGN_CENTER, 0, 0);
+            }
+
+            /* Once there is a picture and an address, the banner has said all it
+             * can and only covers the view. */
+            if (slow && stats.fps > 0.5f && app_wifi_is_connected() &&
+                !lv_obj_has_flag(s_ui.status_label, LV_OBJ_FLAG_HIDDEN) &&
+                !s_ui.status_dirty) {
+                lv_obj_add_flag(s_ui.status_label, LV_OBJ_FLAG_HIDDEN);
+            }
+
             if (slow) {
             snprintf(buf, sizeof(buf), "%.0f fps   %u viewer%s   %u KB/frame",
                      stats.fps, (unsigned)app_httpd_client_count(),
@@ -372,12 +391,85 @@ esp_err_t app_ui_start(void)
     return ESP_OK;
 }
 
+/* Stores the message rather than writing it. Writing straight to LVGL meant a
+ * status that arrived while the lock was held — which is most of startup — was
+ * silently dropped, leaving whichever earlier message had got through sitting
+ * on the screen. */
 void app_ui_set_status(const char *text)
 {
-    if (s_ui.status_label && bsp_display_lock(200)) {
-        lv_label_set_text(s_ui.status_label, text);
-        lv_obj_clear_flag(s_ui.status_label, LV_OBJ_FLAG_HIDDEN);
-        lv_obj_align(s_ui.status_label, LV_ALIGN_CENTER, 0, 0);
+    strlcpy(s_ui.status_text, text ? text : "", sizeof(s_ui.status_text));
+    s_ui.status_dirty = true;
+}
+
+esp_err_t app_ui_screenshot(uint8_t *out, size_t capacity, size_t *out_len)
+{
+    lv_display_t *disp = lv_display_get_default();
+    int32_t w = lv_display_get_horizontal_resolution(disp);
+    int32_t h = lv_display_get_vertical_resolution(disp);
+    static jpeg_encoder_handle_t encoder;
+    lv_draw_buf_t wrapper;
+    lv_draw_buf_t *buf = NULL;
+    uint8_t *pixels = NULL;
+    esp_err_t err = ESP_FAIL;
+    uint32_t len = 0;
+
+    if (!encoder) {
+        const jpeg_encode_engine_cfg_t cfg = { .timeout_ms = 200 };
+
+        if (jpeg_new_encoder_engine(&cfg, &encoder) != ESP_OK) {
+            return ESP_FAIL;
+        }
+    }
+
+    /* lv_draw_buf_create() allocates through LVGL, whose pool is 64 KB — a
+     * full-screen snapshot is 1.8 MB and never fits. Wrap PSRAM instead and let
+     * lv_snapshot draw into that. */
+    {
+        uint32_t stride = (uint32_t)w * 2;
+        size_t size = stride * (size_t)h;
+
+        pixels = heap_caps_aligned_alloc(64, size,
+                                         MALLOC_CAP_SPIRAM | MALLOC_CAP_CACHE_ALIGNED);
+        if (!pixels) {
+            return ESP_ERR_NO_MEM;
+        }
+        buf = &wrapper;
+        if (lv_draw_buf_init(buf, w, h, LV_COLOR_FORMAT_RGB565, stride,
+                             pixels, size) != LV_RESULT_OK) {
+            free(pixels);
+            return ESP_ERR_NO_MEM;
+        }
+    }
+
+    if (bsp_display_lock(2000)) {
+        if (lv_snapshot_take_to_draw_buf(lv_screen_active(), LV_COLOR_FORMAT_RGB565,
+                                         buf) == LV_RESULT_OK) {
+            err = ESP_OK;
+        }
         bsp_display_unlock();
     }
+
+    if (err == ESP_OK) {
+        const jpeg_encode_cfg_t enc = {
+            .width         = w,
+            .height        = h,
+            .src_type      = JPEG_ENCODE_IN_FORMAT_RGB565,
+            .sub_sample    = JPEG_DOWN_SAMPLING_YUV420,
+            .image_quality = 80,
+            /* The UI is rendered in LVGL's RGB565 order while the preview
+             * canvas holds the PPA's, and the two differ — one setting cannot
+             * make both right in a single image. The UI wins: this endpoint
+             * exists to see what the panel is showing, and the camera's real
+             * colour is available from /snapshot. The panel itself is correct
+             * either way. */
+            .pixel_reverse = false,
+        };
+
+        err = jpeg_encoder_process(encoder, &enc, buf->data, buf->data_size,
+                                   out, capacity, &len);
+        *out_len = len;
+    }
+
+    free(pixels);
+    return err;
 }

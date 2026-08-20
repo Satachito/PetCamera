@@ -107,6 +107,8 @@ CONFIG_HTTPD_MAX_URI_LEN=512
 
 # --- LVGL (local status console on the 5" panel) -----------------------------
 CONFIG_LV_USE_QRCODE=y
+# Lets /screenshot render whatever is on the Tab5 panel right now.
+CONFIG_LV_USE_SNAPSHOT=y
 CONFIG_LV_FONT_MONTSERRAT_20=y
 CONFIG_LV_FONT_MONTSERRAT_28=y
 CONFIG_LV_FONT_MONTSERRAT_48=y

@@ -59,6 +59,7 @@ idf.py build flash monitor
 | `http://<ip>:81/stream` | Raw MJPEG — works in VLC or a bare `<img>` tag |
 | `http://<ip>/snapshot` | One JPEG |
 | `http://<ip>/status` | JSON: fps, resolution, frame size, uptime, heap, motion, rotation |
+| `http://<ip>/screenshot` | JPEG of the Tab5's own panel (see below) |
 | `http://<ip>/clips` | JSON list of recorded clips |
 | `http://<ip>/clip?name=…` | Download one clip |
 | `http://<ip>/audio` | Half a second of WAV from the microphone |
@@ -238,6 +239,24 @@ Wi-Fi credentials live in `sdkconfig.defaults.local` (gitignored, see
 Neither Wi-Fi nor camera failure is fatal: both log the reason and leave the
 console up, because a camera that reboots in a loop cannot tell you why.
 
+## Seeing the device's own screen
+
+`GET /screenshot` renders whatever the panel is showing — countdown, QR code,
+settings panel — as a JPEG. Diagnosing a frozen or unexpected UI without it means
+walking over to the device and describing what you see.
+
+Two details it took a while to get right:
+
+- **`lv_draw_buf_create()` cannot hold a full-screen snapshot.** It allocates
+  through LVGL, whose pool is 64 KB against 1.8 MB needed. PSRAM is wrapped with
+  `lv_draw_buf_init()` and `lv_snapshot_take_to_draw_buf()` draws into that.
+- **The camera area comes out colour-shifted, and that is not fixable here.** The
+  interface is rendered in LVGL's RGB565 byte order and the preview canvas holds
+  the PPA's; they differ, so one `pixel_reverse` setting cannot honour both in a
+  single JPEG. The interface wins, since that is what the endpoint is for.
+  `/snapshot` gives the camera's real colour. The panel itself is correct either
+  way — this is only an artefact of re-encoding the framebuffer.
+
 ## Sound
 
 **Listening** works from the viewer page: press **Listen**. The page fetches half
@@ -284,6 +303,11 @@ Three things about the capture path are worth keeping in mind:
 peripheral, and with the capture side holding it open as a 2-channel receiver,
 playback ran to completion with nothing audible. The microphone is closed for
 the duration and reopened afterwards.
+
+**Status messages must not be written straight to LVGL.** `app_ui_set_status()`
+stores the text for the refresh task to apply. Writing it inside the call meant
+any message arriving while the LVGL lock was held — which is most of startup —
+was silently dropped, leaving an earlier message stranded on screen.
 
 **Volume is applied after the codec is opened**, not before. The speaker is only
 open while a sound plays, so a level set at startup lands on a closed device and

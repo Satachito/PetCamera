@@ -20,6 +20,8 @@
 #include "app_audio.h"
 #include "app_orientation.h"
 #include "app_ota.h"
+#include "app_ui.h"
+#include "driver/jpeg_encode.h"
 #include "app_setup.h"
 #include "app_wifi.h"
 #include "frame_bus.h"
@@ -932,6 +934,35 @@ static esp_err_t playsound_handler(httpd_req_t *req)
                                                  : "{\"queued\":false}");
 }
 
+/* The Tab5's own screen, as a picture. */
+static esp_err_t screenshot_handler(httpd_req_t *req)
+{
+    const jpeg_encode_memory_alloc_cfg_t mem = {
+        .buffer_direction = JPEG_ENC_ALLOC_OUTPUT_BUFFER,
+    };
+    size_t allocated = 0;
+    uint8_t *jpeg = jpeg_alloc_encoder_mem(512 * 1024, &mem, &allocated);
+    size_t len = 0;
+    esp_err_t err;
+
+    if (!jpeg) {
+        return httpd_resp_send_500(req);
+    }
+
+    err = app_ui_screenshot(jpeg, allocated, &len);
+    if (err != ESP_OK || len == 0) {
+        free(jpeg);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, esp_err_to_name(err));
+        return ESP_FAIL;
+    }
+
+    httpd_resp_set_type(req, "image/jpeg");
+    httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=screen.jpg");
+    err = httpd_resp_send(req, (const char *)jpeg, len);
+    free(jpeg);
+    return err;
+}
+
 static esp_err_t stream_handler(httpd_req_t *req)
 {
     uint32_t last_seq = 0;
@@ -1035,7 +1066,9 @@ esp_err_t app_httpd_start(void)
     static const httpd_uri_t sstate_uri = { .uri = "/setupstate", .method = HTTP_GET, .handler = setupstate_handler };
     REGISTER(page_server, scan_uri);
     REGISTER(page_server, setup_uri);
+    static const httpd_uri_t shot_uri = { .uri = "/screenshot", .method = HTTP_GET, .handler = screenshot_handler };
     REGISTER(page_server, sstate_uri);
+    REGISTER(page_server, shot_uri);
     static const httpd_uri_t audio_uri  = { .uri = "/audio",       .method = HTTP_GET, .handler = audio_handler };
     static const httpd_uri_t sounds_uri = { .uri = "/sounds",      .method = HTTP_GET, .handler = sounds_handler };
     static const httpd_uri_t plays_uri  = { .uri = "/playsound",   .method = HTTP_GET, .handler = playsound_handler };

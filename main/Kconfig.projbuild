@@ -78,10 +78,17 @@ menu "Tab5 Pet Camera"
 
     config PETCAM_PIXEL_REVERSE
         bool "Swap RGB565 byte order when encoding"
-        default n
+        default y
         help
-            If the stream comes out with red and blue swapped, turn this on. It
-            flips the byte order the JPEG encoder expects from the ISP output.
+            On. Without it the ISP's byte order reaches the JPEG encoder
+            reversed: skies come out pink and brickwork cyan in the stream, in
+            saved snapshots and in recorded clips. The panel is fed separately
+            and looks right either way, which is what makes it easy to miss.
+
+            Do not judge this by whether greens look green. Green occupies the
+            middle six bits of RGB565 and survives the swap untouched — foliage
+            and terminal text look perfectly normal while everything else is
+            wrong. Look at a blue sky or red brick.
 
     config PETCAM_ENABLE_PREVIEW
         bool "Show the live camera image on the Tab5's own screen"

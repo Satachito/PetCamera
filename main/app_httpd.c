@@ -963,6 +963,102 @@ static esp_err_t screenshot_handler(httpd_req_t *req)
     return err;
 }
 
+/* Reads the colour matrix, and scales its rows when asked.
+ *
+ * The matrix arrives from the sensor tuning with all three rows summing to 1,
+ * so it passes neutrals through untouched — it is not what tints the picture.
+ * What reaches it is already magenta: on a grey sky, red and blue measured
+ * about 245 against green's 192. Scaling the red and blue rows down folds a
+ * white-balance correction into the matrix, which is the one lever reachable
+ * from here.
+ *
+ * Tuning colour by rebuilding for each attempt is far too slow to converge, so
+ * this is adjustable live.
+ */
+static esp_err_t colour_handler(httpd_req_t *req)
+{
+    char query[192];
+    char value[24];
+    float m[9];
+    bool enabled = false;
+    char json[360];
+    float scale[3] = { 1.0f, 1.0f, 1.0f };
+    bool change = false;
+    static const char *keys[3] = { "r", "g", "b" };
+
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        for (int i = 0; i < 3; i++) {
+            if (httpd_query_key_value(query, keys[i], value, sizeof(value)) == ESP_OK) {
+                float v = atof(value);
+
+                if (v > 0.05f && v < 4.0f) {
+                    scale[i] = v;
+                    change = true;
+                }
+            }
+        }
+    }
+
+    if (change) {
+        if (app_camera_get_ccm(m, &enabled) != ESP_OK) {
+            return httpd_resp_send_500(req);
+        }
+        for (int r = 0; r < 3; r++) {
+            for (int c = 0; c < 3; c++) {
+                m[r * 3 + c] *= scale[r];
+            }
+        }
+        app_camera_set_ccm(m);
+    }
+
+    if (app_camera_get_ccm(m, &enabled) != ESP_OK) {
+        return httpd_resp_send_500(req);
+    }
+    snprintf(json, sizeof(json),
+             "{\"enabled\":%s,\"matrix\":[[%.3f,%.3f,%.3f],[%.3f,%.3f,%.3f],[%.3f,%.3f,%.3f]],"
+             "\"sums\":[%.3f,%.3f,%.3f]}",
+             enabled ? "true" : "false",
+             m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8],
+             m[0] + m[1] + m[2], m[3] + m[4] + m[5], m[6] + m[7] + m[8]);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, json);
+}
+
+/* White balance gains, applied to raw Bayer data before anything clips. */
+static esp_err_t wb_handler(httpd_req_t *req)
+{
+    char query[160];
+    char value[24];
+    float red = 0, blue = 0;
+    char json[160];
+
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK) {
+        if (httpd_query_key_value(query, "auto", value, sizeof(value)) == ESP_OK) {
+            app_camera_set_awb_auto(atoi(value) != 0);
+        }
+        if (app_camera_get_wb(&red, &blue) == ESP_OK) {
+            float r = red, b = blue;
+
+            if (httpd_query_key_value(query, "red", value, sizeof(value)) == ESP_OK) {
+                r = atof(value);
+            }
+            if (httpd_query_key_value(query, "blue", value, sizeof(value)) == ESP_OK) {
+                b = atof(value);
+            }
+            if (r != red || b != blue) {
+                app_camera_set_wb(r, b);
+            }
+        }
+    }
+
+    if (app_camera_get_wb(&red, &blue) != ESP_OK) {
+        return httpd_resp_send_500(req);
+    }
+    snprintf(json, sizeof(json), "{\"red\":%.3f,\"blue\":%.3f}", red, blue);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, json);
+}
+
 static esp_err_t stream_handler(httpd_req_t *req)
 {
     uint32_t last_seq = 0;
@@ -1068,7 +1164,11 @@ esp_err_t app_httpd_start(void)
     REGISTER(page_server, setup_uri);
     static const httpd_uri_t shot_uri = { .uri = "/screenshot", .method = HTTP_GET, .handler = screenshot_handler };
     REGISTER(page_server, sstate_uri);
+    static const httpd_uri_t col_uri = { .uri = "/colour", .method = HTTP_GET, .handler = colour_handler };
     REGISTER(page_server, shot_uri);
+    static const httpd_uri_t wb_uri = { .uri = "/wb", .method = HTTP_GET, .handler = wb_handler };
+    REGISTER(page_server, col_uri);
+    REGISTER(page_server, wb_uri);
     static const httpd_uri_t audio_uri  = { .uri = "/audio",       .method = HTTP_GET, .handler = audio_handler };
     static const httpd_uri_t sounds_uri = { .uri = "/sounds",      .method = HTTP_GET, .handler = sounds_handler };
     static const httpd_uri_t plays_uri  = { .uri = "/playsound",   .method = HTTP_GET, .handler = playsound_handler };

@@ -60,6 +60,8 @@ idf.py build flash monitor
 | `http://<ip>/snapshot` | One JPEG |
 | `http://<ip>/status` | JSON: fps, resolution, frame size, uptime, heap, motion, rotation |
 | `http://<ip>/screenshot` | JPEG of the Tab5's own panel (see below) |
+| `http://<ip>/wb` | ISP white balance gains; `?red=&blue=` to set |
+| `http://<ip>/colour` | ISP colour matrix; `?r=&g=&b=` scales its rows |
 | `http://<ip>/clips` | JSON list of recorded clips |
 | `http://<ip>/clip?name=…` | Download one clip |
 | `http://<ip>/audio` | Half a second of WAV from the microphone |
@@ -238,6 +240,48 @@ Wi-Fi credentials live in `sdkconfig.defaults.local` (gitignored, see
 
 Neither Wi-Fi nor camera failure is fatal: both log the reason and leave the
 console up, because a camera that reboots in a loop cannot tell you why.
+
+## Colour
+
+**`PETCAM_PIXEL_REVERSE` must be on.** Without it the ISP's byte order reaches
+the JPEG encoder reversed and every encoded path — the stream, saved snapshots,
+recorded clips — comes out with red and blue exchanged. Skies turn red, brick
+turns purple, tan walls turn cyan. The panel is fed separately and looks correct
+either way, which is what makes it easy to miss.
+
+**Do not judge this by whether greens look green.** Green occupies the middle six
+bits of RGB565 and is untouched by the swap, so foliage and terminal text look
+perfectly normal while everything else is wrong. That reasoning cost most of a
+day here. Look at a blue sky or red brick.
+
+### Magenta highlights are an exposure limit, not a white balance fault
+
+A blown-out sky comes out magenta rather than white. The chain is:
+
+1. Auto white balance applies gains of about **1.63 to red and 1.57 to blue**
+   against green's 1.0, on the raw Bayer data.
+2. In a very bright area red and blue therefore reach saturation while green
+   still has headroom.
+3. Clipped-and-unequal channels are magenta, and nothing downstream can undo it.
+
+Two things were measured before concluding this. Scaling the colour matrix rows
+changed brick (149 to 77) and foliage (119 to 55) but left the sky at 246 —
+proof that the sky was already clipped before the matrix. And lowering the white
+balance gains **did** turn the sky white, but sent everything else green: the
+building's blue channel fell from 98 to 21. The automatic values are right for
+the scene; the sky is what exposing for the subject costs.
+
+For a camera pointed at a room this does not arise. Fixing it properly would
+need HDR, not tuning.
+
+### Setting white balance by hand
+
+`/wb?auto=0&red=1.4&blue=1.4` holds — the IPA does not overwrite it. Useful under
+fixed indoor lighting, where automatic balancing can wander.
+
+**There is no way back other than a reboot.** `auto=1` does not re-enable the
+IPA's control; the driver simply stores whatever gain it is given. Restarting the
+device brings automatic balancing back.
 
 ## Seeing the device's own screen
 

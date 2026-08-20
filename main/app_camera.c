@@ -11,8 +11,11 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "driver/jpeg_encode.h"
+#include "driver/ppa.h"
+#include "freertos/semphr.h"
 #include "esp_heap_caps.h"
 #include "linux/videodev2.h"
+#include "esp_video_isp_ioctl.h"
 /* Defines ESP_VIDEO_MIPI_CSI_DEVICE_NAME, which the BSP header refers to via
  * BSP_CAMERA_DEVICE without including it itself. */
 #include "esp_video_device.h"
@@ -45,6 +48,18 @@ static const char *TAG = "camera";
 
 static struct {
     int                   fd;
+    /* Filled by the capture task when a still is asked for. Doing the rotation
+     * there avoids copying every frame just in case someone wants one. */
+    ppa_client_handle_t   still_ppa;
+    uint8_t              *still_rgb;
+    uint8_t              *still_jpeg;
+    size_t                still_rgb_size;
+    size_t                still_jpeg_size;
+    size_t                still_len;
+    int                   still_degrees;
+    volatile bool         still_wanted;
+    volatile bool         still_ready;
+    SemaphoreHandle_t     still_lock;
     jpeg_encoder_handle_t encoder;
     uint8_t              *capture_buf[CAPTURE_BUFFERS];
     uint32_t              capture_len[CAPTURE_BUFFERS];
@@ -253,6 +268,54 @@ static void capture_task(void *arg)
             s_cam.stats.dropped++;
         }
 
+        if (usable && s_cam.still_wanted) {
+            /* PPA turns counter-clockwise; view_rotation is clockwise. */
+            int ccw = ((360 - s_cam.still_degrees) % 360 + 360) % 360;
+            bool swapped = (ccw == 90 || ccw == 270);
+            uint32_t out_w = swapped ? s_cam.height : s_cam.width;
+            uint32_t out_h = swapped ? s_cam.width : s_cam.height;
+            ppa_srm_oper_config_t op = {
+                .in = {
+                    .buffer  = s_cam.capture_buf[buf.index],
+                    .pic_w   = s_cam.width,
+                    .pic_h   = s_cam.height,
+                    .block_w = s_cam.width,
+                    .block_h = s_cam.height,
+                    .srm_cm  = PPA_SRM_COLOR_MODE_RGB565,
+                },
+                .out = {
+                    .buffer      = s_cam.still_rgb,
+                    .buffer_size = s_cam.still_rgb_size,
+                    .pic_w       = out_w,
+                    .pic_h       = out_h,
+                    .srm_cm      = PPA_SRM_COLOR_MODE_RGB565,
+                },
+                .rotation_angle = (ccw == 90)  ? PPA_SRM_ROTATION_ANGLE_90 :
+                                  (ccw == 180) ? PPA_SRM_ROTATION_ANGLE_180 :
+                                  (ccw == 270) ? PPA_SRM_ROTATION_ANGLE_270 :
+                                                 PPA_SRM_ROTATION_ANGLE_0,
+                .scale_x = 1.0f,
+                .scale_y = 1.0f,
+                .mode = PPA_TRANS_MODE_BLOCKING,
+            };
+
+            if (ppa_do_scale_rotate_mirror(s_cam.still_ppa, &op) == ESP_OK) {
+                jpeg_encode_cfg_t still_cfg = encode_cfg;
+                uint32_t jlen = 0;
+
+                still_cfg.width  = out_w;
+                still_cfg.height = out_h;
+                if (jpeg_encoder_process(s_cam.encoder, &still_cfg, s_cam.still_rgb,
+                                         (uint32_t)out_w * out_h * 2,
+                                         s_cam.still_jpeg, s_cam.still_jpeg_size,
+                                         &jlen) == ESP_OK) {
+                    s_cam.still_len = jlen;
+                    s_cam.still_ready = true;
+                }
+            }
+            s_cam.still_wanted = false;
+        }
+
 #if CONFIG_PETCAM_ENABLE_MOTION
         if (usable) {
             app_motion_submit_frame(s_cam.capture_buf[buf.index], s_cam.width, s_cam.height);
@@ -326,6 +389,31 @@ esp_err_t app_camera_start(void)
         return ESP_FAIL;
     }
 
+    {
+        const ppa_client_config_t ppa_cfg = {
+            .oper_type = PPA_OPERATION_SRM,
+            .max_pending_trans_num = 1,
+        };
+        size_t rgb = (size_t)s_cam.width * s_cam.height * 2;
+
+        s_cam.still_lock = xSemaphoreCreateMutex();
+        s_cam.still_rgb_size = rgb;
+        s_cam.still_rgb = heap_caps_aligned_alloc(128, rgb,
+                                                  MALLOC_CAP_SPIRAM | MALLOC_CAP_CACHE_ALIGNED);
+        s_cam.still_jpeg_size = JPEG_BUFFER_BYTES;
+        {
+            const jpeg_encode_memory_alloc_cfg_t mem = {
+                .buffer_direction = JPEG_ENC_ALLOC_OUTPUT_BUFFER,
+            };
+            size_t got = 0;
+            s_cam.still_jpeg = jpeg_alloc_encoder_mem(JPEG_BUFFER_BYTES, &mem, &got);
+        }
+        if (!s_cam.still_lock || !s_cam.still_rgb || !s_cam.still_jpeg ||
+            ppa_register_client(&ppa_cfg, &s_cam.still_ppa) != ESP_OK) {
+            ESP_LOGW(TAG, "rotated stills unavailable; /snapshot will serve the raw frame");
+        }
+    }
+
     /* Priority 5 keeps capture ahead of the HTTP tasks; the encode is hardware
      * so this task is mostly blocked in ioctl(). */
     if (xTaskCreatePinnedToCore(capture_task, "petcam_capture", 6144, NULL, 5, NULL, 1) != pdPASS) {
@@ -342,4 +430,155 @@ void app_camera_get_stats(app_camera_stats_t *out)
 {
     *out = s_cam.stats;
     out->dropped += frame_bus_dropped();
+}
+
+esp_err_t app_camera_still(int degrees, const uint8_t **out, size_t *len, int timeout_ms)
+{
+    int waited = 0;
+
+    if (!s_cam.still_ppa || !s_cam.still_lock) {
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
+    xSemaphoreTake(s_cam.still_lock, portMAX_DELAY);
+    s_cam.still_degrees = degrees;
+    s_cam.still_ready = false;
+    s_cam.still_wanted = true;
+
+    while (!s_cam.still_ready && waited < timeout_ms) {
+        vTaskDelay(pdMS_TO_TICKS(20));
+        waited += 20;
+    }
+
+    if (!s_cam.still_ready) {
+        s_cam.still_wanted = false;
+        xSemaphoreGive(s_cam.still_lock);
+        return ESP_ERR_TIMEOUT;
+    }
+
+    *out = s_cam.still_jpeg;
+    *len = s_cam.still_len;
+    /* Held until the caller releases it: the buffer is reused by the next
+     * request, so overlapping snapshots must not share it. */
+    return ESP_OK;
+}
+
+void app_camera_still_release(void)
+{
+    if (s_cam.still_lock) {
+        xSemaphoreGive(s_cam.still_lock);
+    }
+}
+
+/* The ISP has its own device node; the capture node knows nothing about colour
+ * correction. */
+static esp_err_t ccm_ioctl(unsigned long request, esp_video_isp_ccm_t *ccm)
+{
+    int isp = open(ESP_VIDEO_ISP1_DEVICE_NAME, O_RDWR);
+    esp_err_t err;
+
+    struct v4l2_ext_control control = {
+        .id = V4L2_CID_USER_ESP_ISP_CCM,
+        .size = sizeof(*ccm),
+        .ptr = ccm,
+    };
+    struct v4l2_ext_controls controls = {
+        .ctrl_class = V4L2_CTRL_CLASS_USER,
+        .count = 1,
+        .controls = &control,
+    };
+
+    if (isp < 0) {
+        ESP_LOGE(TAG, "cannot open %s (errno %d)", ESP_VIDEO_ISP1_DEVICE_NAME, errno);
+        return ESP_FAIL;
+    }
+    err = ioctl(isp, request, &controls) == 0 ? ESP_OK : ESP_FAIL;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "CCM ioctl failed (errno %d)", errno);
+    }
+    close(isp);
+    return err;
+}
+
+esp_err_t app_camera_get_ccm(float *matrix, bool *enabled)
+{
+    esp_video_isp_ccm_t ccm = { 0 };
+
+    if (ccm_ioctl(VIDIOC_G_EXT_CTRLS, &ccm) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    *enabled = ccm.enable;
+    for (int r = 0; r < 3; r++) {
+        for (int c = 0; c < 3; c++) {
+            matrix[r * 3 + c] = ccm.matrix[r][c];
+        }
+    }
+    return ESP_OK;
+}
+
+esp_err_t app_camera_set_ccm(const float *matrix)
+{
+    esp_video_isp_ccm_t ccm = { .enable = true };
+
+    for (int r = 0; r < 3; r++) {
+        for (int c = 0; c < 3; c++) {
+            ccm.matrix[r][c] = matrix[r * 3 + c];
+        }
+    }
+    return ccm_ioctl(VIDIOC_S_EXT_CTRLS, &ccm);
+}
+
+static esp_err_t isp_int_ctrl(unsigned long request, uint32_t id, int32_t *value)
+{
+    int isp = open(ESP_VIDEO_ISP1_DEVICE_NAME, O_RDWR);
+    struct v4l2_ext_control control = { .id = id, .value = *value };
+    struct v4l2_ext_controls controls = {
+        .ctrl_class = V4L2_CTRL_CLASS_USER,
+        .count = 1,
+        .controls = &control,
+    };
+    esp_err_t err;
+
+    if (isp < 0) {
+        return ESP_FAIL;
+    }
+    err = ioctl(isp, request, &controls) == 0 ? ESP_OK : ESP_FAIL;
+    if (err == ESP_OK) {
+        *value = control.value;
+    } else {
+        ESP_LOGE(TAG, "ISP control 0x%08x failed (errno %d)", (unsigned)id, errno);
+    }
+    close(isp);
+    return err;
+}
+
+esp_err_t app_camera_get_wb(float *red, float *blue)
+{
+    int32_t r = 0, b = 0;
+
+    if (isp_int_ctrl(VIDIOC_G_EXT_CTRLS, V4L2_CID_RED_BALANCE, &r) != ESP_OK ||
+        isp_int_ctrl(VIDIOC_G_EXT_CTRLS, V4L2_CID_BLUE_BALANCE, &b) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    *red = (float)r / V4L2_CID_RED_BALANCE_DEN;
+    *blue = (float)b / V4L2_CID_BLUE_BALANCE_DEN;
+    return ESP_OK;
+}
+
+esp_err_t app_camera_set_wb(float red, float blue)
+{
+    int32_t r = (int32_t)(red * V4L2_CID_RED_BALANCE_DEN);
+    int32_t b = (int32_t)(blue * V4L2_CID_BLUE_BALANCE_DEN);
+
+    if (isp_int_ctrl(VIDIOC_S_EXT_CTRLS, V4L2_CID_RED_BALANCE, &r) != ESP_OK) {
+        return ESP_FAIL;
+    }
+    return isp_int_ctrl(VIDIOC_S_EXT_CTRLS, V4L2_CID_BLUE_BALANCE, &b);
+}
+
+esp_err_t app_camera_set_awb_auto(bool enable)
+{
+    int32_t v = enable ? 1 : 0;
+
+    return isp_int_ctrl(VIDIOC_S_EXT_CTRLS, V4L2_CID_AUTO_WHITE_BALANCE, &v);
 }

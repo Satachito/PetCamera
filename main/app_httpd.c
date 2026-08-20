@@ -409,10 +409,50 @@ static esp_err_t page_handler(httpd_req_t *req)
     return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
 }
 
+/* Saves the picture the viewer is looking at, not the one the sensor took.
+ *
+ * The stream is the raw sensor frame and the browser turns it with CSS, so
+ * saving that JPEG gives whatever angle the sensor happens to sit at — right in
+ * one device orientation, sideways or upside down in the other three. The frame
+ * is rotated before encoding so the file matches the view.
+ *
+ * ?raw=1 asks for the unrotated sensor frame, which is also the fallback if
+ * rotation is unavailable. */
 static esp_err_t snapshot_handler(httpd_req_t *req)
 {
     uint32_t seq = 0;
-    frame_t *frame = frame_bus_acquire_latest(&seq, FRAME_WAIT_TIMEOUT_MS);
+    frame_t *frame;
+    char query[64];
+    char value[8];
+    bool want_raw = false;
+    int rotation = 0;
+
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) == ESP_OK &&
+        httpd_query_key_value(query, "raw", value, sizeof(value)) == ESP_OK) {
+        want_raw = atoi(value) != 0;
+    }
+
+#if CONFIG_PETCAM_AUTO_ROTATE
+    rotation = app_orientation_get();
+#endif
+    rotation = (360 - ((CONFIG_PETCAM_CAMERA_MOUNT_ROTATION + rotation) % 360)) % 360;
+
+    if (!want_raw && rotation != 0) {
+        const uint8_t *still = NULL;
+        size_t len = 0;
+
+        if (app_camera_still(rotation, &still, &len, 2000) == ESP_OK) {
+            httpd_resp_set_type(req, "image/jpeg");
+            httpd_resp_set_hdr(req, "Content-Disposition", "inline; filename=snapshot.jpg");
+            esp_err_t err = httpd_resp_send(req, (const char *)still, len);
+            app_camera_still_release();
+            return err;
+        }
+        /* Falls through to the sensor frame rather than failing: a snapshot at
+         * the wrong angle beats no snapshot. */
+    }
+
+    frame = frame_bus_acquire_latest(&seq, FRAME_WAIT_TIMEOUT_MS);
 
     if (!frame) {
         /* esp_http_server has no 503 in its error enum, so set the line by hand. */

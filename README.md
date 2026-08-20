@@ -57,7 +57,7 @@ idf.py build flash monitor
 | --- | --- |
 | `http://<ip>/` or `http://tab5-petcam.local/` | Viewer page with live image and stats |
 | `http://<ip>:81/stream` | Raw MJPEG — works in VLC or a bare `<img>` tag |
-| `http://<ip>/snapshot` | One JPEG |
+| `http://<ip>/snapshot` | One JPEG, turned to match the view (`?raw=1` for the sensor's) |
 | `http://<ip>/status` | JSON: fps, resolution, frame size, uptime, heap, motion, rotation |
 | `http://<ip>/screenshot` | JPEG of the Tab5's own panel (see below) |
 | `http://<ip>/wb` | ISP white balance gains; `?red=&blue=` to set |
@@ -240,6 +240,22 @@ Wi-Fi credentials live in `sdkconfig.defaults.local` (gitignored, see
 
 Neither Wi-Fi nor camera failure is fatal: both log the reason and leave the
 console up, because a camera that reboots in a loop cannot tell you why.
+
+## Saved stills match the view, not the sensor
+
+The stream is always the raw sensor frame and the browser turns it with CSS, so
+saving that JPEG gives whatever angle the sensor happens to sit at — correct in
+one device orientation and sideways or upside down in the other three.
+`/snapshot` rotates the frame with the PPA before encoding, so a saved file
+matches what was on screen. In portrait it comes out 720x1280 rather than
+1280x720.
+
+The rotation is done in the capture task on request rather than by keeping a
+copy of every frame: a spare 1.8 MB buffer filled at 13 fps costs 24 MB/s of
+memory bandwidth for something asked for once in a while.
+
+`?raw=1` returns the sensor's own framing, and is also the automatic fallback —
+a still at the wrong angle beats no still.
 
 ## Colour
 

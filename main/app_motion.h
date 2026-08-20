@@ -65,11 +65,38 @@ int app_motion_get_diffmap(uint8_t *out, int max, int *w, int *h);
  */
 int app_motion_delete(const char *name);
 
+/** @brief Feed a captured RGB565 frame. Called from the capture task. */
+void app_motion_submit_frame(const void *rgb565, uint32_t width, uint32_t height);
+
+/** @brief Offer the encoded JPEG for the current clip, if one is open. */
+void app_motion_submit_jpeg(const uint8_t *jpeg, size_t len);
+
+void app_motion_get_stats(app_motion_stats_t *out);
+
 /**
- * @brief Reformat the card and recreate the directories.
+ * @brief Copy the most recent per-cell difference map.
  *
- * Everything on the card is lost. Needed when the filesystem reports free space
- * it cannot actually allocate — writes then fail with ENOSPC while df looks
- * healthy, and no amount of deleting fixes it.
+ * Two plausible explanations for a high score on a still scene — sensor noise
+ * and global exposure drift — both failed to explain the measurements, so this
+ * exposes where the change actually is. Scattered means noise; concentrated
+ * means something in the scene really is moving.
+ *
+ * @param out  Receives one absolute delta per cell, row-major.
+ * @param max  Capacity of @p out.
+ * @param w    Receives the grid width.
+ * @param h    Receives the grid height.
+ * @return Number of cells written.
  */
-esp_err_t app_motion_format_card(void);
+int app_motion_get_diffmap(uint8_t *out, int max, int *w, int *h);
+
+/**
+ * @brief Delete recordings.
+ *
+ * @param name  One clip to remove, or NULL for every clip.
+ * @return Number of files deleted, or -1 if the card is not available.
+ *
+ * A clip being written is closed first — unlinking an open file leaves the
+ * writer appending to something that no longer has a directory entry.
+ */
+int app_motion_delete(const char *name);
+

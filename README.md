@@ -329,10 +329,11 @@ setting was reverted, **the card's allocation table stayed damaged**. Every
 subsequent write failed with `ENOSPC` while `esp_vfs_fat_info` cheerfully
 reported 113 MB free, so recordings and clips were created as zero-byte files.
 
-The card had to be reformatted, which is what `POST /formatcard` exists for. It
-is POST rather than GET deliberately: a GET that erases storage is something a
-browser can be talked into issuing on its own through a prefetch or a link
-preview.
+The card had to be reformatted. There is deliberately no endpoint for that —
+erasing storage over an unauthenticated HTTP interface is not a thing this
+firmware should offer. Take the card out and format it as FAT on a computer, or
+add `format_if_mount_failed` to the mount call if you want it handled
+automatically.
 
 Names are normalised to `a-z 0-9 - _` instead. It is a real limitation — a pet
 called マレア cannot have a sound file named after her — but it is preferable to
@@ -435,5 +436,5 @@ names do not fit 8.3 and the BSP warns at mount.
    PPA pass per frame.
 3. Matching ESP-Hosted firmware on the C6, which would restore RSSI and may lift
    the throughput ceiling.
-4. Authentication on `/update` and `/formatcard`, which are both unauthenticated
-   and both consequential.
+4. Authentication on `/update`. It is unauthenticated, so anyone on the network
+   can replace the firmware — acceptable on a trusted LAN, not beyond one.

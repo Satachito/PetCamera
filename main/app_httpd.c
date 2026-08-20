@@ -932,21 +932,6 @@ static esp_err_t playsound_handler(httpd_req_t *req)
                                                  : "{\"queued\":false}");
 }
 
-/* POST, not GET: this erases the card, and a GET is something a browser can be
- * talked into issuing on its own — a prefetch, a stale bookmark, a link
- * preview. Requiring POST costs nothing and removes that whole class of
- * accident. */
-static esp_err_t formatcard_handler(httpd_req_t *req)
-{
-    esp_err_t err = app_motion_format_card();
-    char reply[128];
-
-    snprintf(reply, sizeof(reply), "{\"formatted\":%s,\"error\":\"%s\"}",
-             err == ESP_OK ? "true" : "false", esp_err_to_name(err));
-    httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, reply);
-}
-
 static esp_err_t stream_handler(httpd_req_t *req)
 {
     uint32_t last_seq = 0;
@@ -1073,8 +1058,6 @@ esp_err_t app_httpd_start(void)
     static const httpd_uri_t clipdelete_uri = { .uri = "/clipdelete", .method = HTTP_GET, .handler = clipdelete_handler };
     REGISTER(page_server, motionmap_uri);
     REGISTER(page_server, clipdelete_uri);
-    static const httpd_uri_t fmt_uri = { .uri = "/formatcard", .method = HTTP_POST, .handler = formatcard_handler };
-    REGISTER(page_server, fmt_uri);
 #endif
 
     ESP_RETURN_ON_ERROR(httpd_start(&stream_server, &stream_cfg), TAG, "stream server failed to start");

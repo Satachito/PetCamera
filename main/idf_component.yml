@@ -1,0 +1,17 @@
+## Managed dependencies, resolved by the ESP-IDF component manager on first build.
+dependencies:
+  idf: ">=5.4"
+
+  # M5Stack Tab5 board support: display (ILI9881C/ST7123), touch (GT911),
+  # camera (SC202CS via esp_video), audio, IO expander, feature power gates.
+  # Transitively pulls esp_video, esp_lvgl_port and lvgl.
+  espressif/m5stack_tab5: "^1.2.0"
+
+  # Wi-Fi lives on the on-board ESP32-C6. esp_wifi_remote forwards the ordinary
+  # esp_wifi_* API over SDIO, so application code looks like any other ESP32.
+  espressif/esp_wifi_remote: "*"
+  espressif/esp_hosted: "*"
+
+  # Lets the phone reach the camera as http://tab5-petcam.local/ instead of
+  # having to remember a DHCP address.
+  espressif/mdns: "^1.2.0"

@@ -1,0 +1,300 @@
+menu "Tab5 Pet Camera"
+
+    config PETCAM_WIFI_SSID
+        string "Wi-Fi SSID"
+        default "myssid"
+        help
+            SSID of the 2.4 GHz network the Tab5 joins. The on-board ESP32-C6 is
+            Wi-Fi 6 but 2.4 GHz only.
+
+    config PETCAM_WIFI_PASSWORD
+        string "Wi-Fi password"
+        default "mypassword"
+
+    config PETCAM_WIFI_MAX_RETRY
+        int "Wi-Fi connect retries before giving up"
+        default 10
+
+    config PETCAM_HOSTNAME
+        string "mDNS hostname"
+        default "tab5-petcam"
+        help
+            The camera is reachable at http://<hostname>.local/ from phones and
+            laptops that speak mDNS (iOS and macOS always do; Android 12+ does).
+
+    choice PETCAM_RESOLUTION
+        prompt "Capture resolution"
+        default PETCAM_RES_1280X720
+        help
+            MEASURED ON HARDWARE: the on-board SC202CS pipeline accepts only
+            1280x720 in RGB565. Every other size here is rejected by
+            VIDIOC_S_FMT, and the driver default (1280x720) is used instead —
+            the firmware logs which sizes were accepted at startup.
+
+            The other options are kept for a USB UVC camera, which negotiates
+            its own set of sizes.
+
+        config PETCAM_RES_640X480
+            bool "640x480 (VGA)"
+        config PETCAM_RES_800X600
+            bool "800x600 (SVGA)"
+        config PETCAM_RES_1280X720
+            bool "1280x720 (HD)"
+        config PETCAM_RES_1600X1200
+            bool "1600x1200 (full sensor)"
+    endchoice
+
+    config PETCAM_WIDTH
+        int
+        default 640 if PETCAM_RES_640X480
+        default 800 if PETCAM_RES_800X600
+        default 1280 if PETCAM_RES_1280X720
+        default 1600 if PETCAM_RES_1600X1200
+
+    config PETCAM_HEIGHT
+        int
+        default 480 if PETCAM_RES_640X480
+        default 600 if PETCAM_RES_800X600
+        default 720 if PETCAM_RES_1280X720
+        default 1200 if PETCAM_RES_1600X1200
+
+    config PETCAM_JPEG_QUALITY
+        int "JPEG quality (1-100)"
+        range 1 100
+        default 70
+        help
+            MEASURED at 1280x720 on this hardware: quality 80 produces ~170 KB
+            per frame, which at 15 fps is ~20 Mbps — most of what the ESP32-C6
+            link can carry. 70 leaves real headroom. Raise it if your network is
+            quiet and you want the detail.
+
+    config PETCAM_MAX_FPS
+        int "Maximum frames per second to publish"
+        range 1 30
+        default 15
+        help
+            Frames arriving faster than this are dropped before encoding. 15 fps
+            is plenty for watching a pet and halves the bandwidth versus 30.
+
+    config PETCAM_PIXEL_REVERSE
+        bool "Swap RGB565 byte order when encoding"
+        default n
+        help
+            If the stream comes out with red and blue swapped, turn this on. It
+            flips the byte order the JPEG encoder expects from the ISP output.
+
+    config PETCAM_ENABLE_PREVIEW
+        bool "Show the live camera image on the Tab5's own screen"
+        default y
+
+    config PETCAM_PREVIEW_FPS
+        int "Preview refresh rate on the local screen"
+        range 1 30
+        depends on PETCAM_ENABLE_PREVIEW
+        default 5
+        help
+            The preview competes with the network stream for memory bandwidth:
+            every refresh pushes a full 720x1280 RGB565 frame to the panel. 5 fps
+            is plenty to see a pet move and leaves the stream alone.
+
+    config PETCAM_AUTO_ROTATE
+        bool "Rotate the console with the device, using the BMI270"
+        default y
+        help
+            The camera and the panel are fixed to the same body, so the live
+            image keeps a constant relationship to the screen and only the text,
+            QR code and buttons turn — the same behaviour as a phone camera app.
+
+    config PETCAM_ORIENTATION_OFFSET
+        int "Rotation offset for the upright pose (0, 90, 180 or 270)"
+        range 0 270
+        depends on PETCAM_AUTO_ROTATE
+        default 0
+        help
+            MEASURED: holding the Tab5 landscape with the USB port on the left
+            reports raw quadrant 90, which maps to LVGL rotation 90 and a
+            1280x720 landscape logical screen — correct for that pose, so the
+            offset stays 0.
+
+            To recalibrate, hold the device the intended way and read
+            orientation.raw from the /status endpoint.
+
+    config PETCAM_CAMERA_MOUNT_ROTATION
+        int "Sensor mounting correction in degrees (0, 90, 180 or 270)"
+        range 0 270
+        default 270
+        help
+            270 — the value BSP_CAMERA_ROTATION already gives for this board.
+
+            Only 90 and 270 are geometrically valid. The camera is 16:9 and the
+            panel is 9:16 in its native scan order, so an odd quarter-turn is
+            what makes the image land exactly on the logical resolution in all
+            four orientations; 0 and 180 would letterbox or overflow.
+
+            The preview applies (this + screen rotation). It is a PLUS because
+            the PPA rotates counter-clockwise while LVGL's display rotation runs
+            the opposite way, so adding is what cancels the screen rotation and
+            keeps the image fixed relative to the panel.
+
+    config PETCAM_SPEAKER_VOLUME
+        int "Speaker volume for played-back sounds (0-100)"
+        range 0 100
+        default 100
+        help
+            The Tab5's speaker is small and the sound has to carry across a room
+            to a pet, so full volume is the useful default. Adjustable live at
+            /volume?percent=N without a rebuild.
+
+    config PETCAM_RECORD_COUNTDOWN_S
+        int "Countdown shown on the Tab5 before recording starts"
+        range 0 10
+        default 3
+        help
+            The phone cannot tell you when the microphone opens, and the person
+            who is about to speak is standing by the Tab5. The device counts
+            down on its own screen so there is something to speak after.
+
+    config PETCAM_RECORD_HOLD_MS
+        int "How long the finished banner stays up, in milliseconds"
+        range 0 3000
+        default 1000
+        help
+            The banner reaching zero and the camera image reappearing in the
+            same instant reads as the screen glitching rather than as the
+            recording finishing. A pause on zero gives the sequence an end.
+            Half a second was still too quick to register.
+
+    config PETCAM_PLAYBACK_MAX_BOOST
+        int "Largest amount playback may be amplified, in dB"
+        range 0 24
+        default 18
+        help
+            Recordings come off the microphone well below full scale — speech at
+            a normal distance measured about -17 dBFS — so most of the amplifier
+            never gets used. Before playing, the file is scanned for its loudest
+            sample and scaled so that peak lands just under full scale.
+
+            This matters more than the amplifier rating: 17 dB of unused
+            headroom is far more than any setting on a 1 W speaker can recover.
+            Raising the ceiling also raises the noise in quiet recordings, since
+            the whole signal is scaled together.
+
+    config PETCAM_MIC_CHANNEL
+        int "Which of the codec's two inputs carries the microphone (0 or 1)"
+        range 0 1
+        default 1
+        help
+            Input 1. Recording speech through input 0 came out around -40 dBFS —
+            a valid file that sounds like silence — while input 1 gives about
+            -17 dBFS for the same speech.
+
+            To check this, record while talking and look at the file, not at any
+            per-channel meter: a four-channel probe of this codec reported levels
+            that did not move when someone spoke and disagreed with what the
+            capture path actually produced.
+
+    config PETCAM_SCREEN_BRIGHTNESS
+        int "Console screen brightness (0-100%)"
+        range 0 100
+        default 40
+        help
+            bsp_display_start() does NOT turn the backlight on — the BSP requires
+            an explicit bsp_display_brightness_set(). Leave this at 0 and the
+            panel stays dark even though LVGL is drawing correctly.
+
+            40% is bright enough to read across a room and easier on a panel that
+            is lit 24 hours a day.
+
+    config PETCAM_ENABLE_MOTION
+        bool "Detect motion and record clips to the microSD card"
+        default y
+
+    config PETCAM_MOTION_SENSITIVITY
+        int "Percent of the frame that must change to count as motion"
+        range 1 100
+        depends on PETCAM_ENABLE_MOTION
+        default 8
+        help
+            Detection compares 40x24 brightness thumbnails a second apart. 8%
+            catches a pet crossing the room while ignoring sensor noise and
+            gradual light changes. Lower it if events are missed; raise it if
+            shadows and auto-exposure keep triggering clips.
+
+    config PETCAM_MOTION_PIXEL_DELTA
+        int "Brightness change that marks a pixel as moved (0-255)"
+        range 4 128
+        depends on PETCAM_ENABLE_MOTION
+        default 24
+        help
+            Raise this before raising the percentage if a still scene keeps
+            triggering. In a dim room the sensor runs at high gain and the noise
+            alone can move a quarter of the pixels by more than 24 levels.
+
+            Check motion.score in /status with nothing moving: it should sit near
+            zero. Whatever it settles at is your noise floor.
+
+    config PETCAM_MOTION_LINGER_S
+        int "Seconds of stillness before a clip is closed"
+        range 1 120
+        depends on PETCAM_ENABLE_MOTION
+        default 10
+
+    config PETCAM_MOTION_MAX_CLIP_S
+        int "Maximum length of a single clip, in seconds"
+        range 5 600
+        depends on PETCAM_ENABLE_MOTION
+        default 60
+        help
+            Stops one long-running disturbance — a curtain in a draught — from
+            filling the card with a single enormous file. Continued motion simply
+            starts the next clip.
+
+    config PETCAM_CLIP_FPS
+        int "Frames per second written into a clip"
+        range 1 30
+        depends on PETCAM_ENABLE_MOTION
+        default 5
+        help
+            MEASURED: writing every encoded frame produced a 37 MB clip for one
+            minute — about 2.2 GB per hour of activity, and a sustained 1.3 MB/s
+            of card traffic. 5 fps is enough to follow what a pet did and cuts
+            both by roughly two thirds.
+
+    config PETCAM_CLIP_MIN_FREE_MB
+        int "Free space to keep on the card, in MB"
+        range 32 8192
+        depends on PETCAM_ENABLE_MOTION
+        default 512
+        help
+            Before each new clip, the oldest recordings are deleted until at
+            least this much space is free. Without it an unattended camera simply
+            stops recording the day the card fills, which is usually the day you
+            most wanted the footage.
+
+            At the default clip rate a minute of activity is roughly 20 MB, so
+            512 MB leaves room for about 25 more minutes after a reclaim.
+
+            The value is capped at a fifth of the card. A flat target larger than
+            the volume can never be satisfied, and the reclaim loop would delete
+            every recording trying to reach it.
+
+    config PETCAM_TIMEZONE
+        string "POSIX timezone for clip timestamps"
+        default "JST-9"
+        help
+            Used to name clips in local time once SNTP has set the clock.
+            "JST-9" is Japan; "GMT0BST,M3.5.0/1,M10.5.0" is the UK.
+
+    config PETCAM_HTTP_PORT
+        int "HTTP port for the page, snapshot and status"
+        default 80
+
+    config PETCAM_STREAM_PORT
+        int "HTTP port for the MJPEG stream"
+        default 81
+        help
+            The stream runs on its own server instance because an MJPEG response
+            never ends, and a single esp_http_server instance handles requests
+            one at a time — sharing a port would block the page from loading.
+
+endmenu

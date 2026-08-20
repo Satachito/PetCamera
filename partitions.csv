@@ -1,0 +1,12 @@
+# Two app slots so the device can update itself over Wi-Fi and fall back if the
+# new image turns out not to work.
+#
+# nvs keeps its original offset and size, so saved Wi-Fi credentials survive the
+# switch from the single-factory layout.
+#
+# Name,     Type, SubType, Offset,   Size
+nvs,        data, nvs,     0x9000,   0x6000,
+otadata,    data, ota,     0xf000,   0x2000,
+phy_init,   data, phy,     0x11000,  0x1000,
+ota_0,      app,  ota_0,   0x20000,  0x500000,
+ota_1,      app,  ota_1,   0x520000, 0x500000,

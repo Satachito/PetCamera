@@ -1,0 +1,25 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "app_wifi.c"
+        "app_camera.c"
+        "app_httpd.c"
+        "app_ui.c"
+        "app_preview.c"
+        "app_setup.c"
+        "app_motion.c"
+        "app_orientation.c"
+        "app_audio.c"
+        "app_ota.c"
+        "frame_bus.c"
+    INCLUDE_DIRS "."
+    REQUIRES
+        esp_driver_jpeg
+        esp_driver_ppa
+        esp_http_server
+        esp_netif
+        esp_event
+        nvs_flash
+        app_update
+        fatfs
+)

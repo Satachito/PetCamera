@@ -1,0 +1,112 @@
+# =============================================================================
+# M5Stack Tab5 (ESP32-P4) pet camera — build defaults
+# =============================================================================
+
+CONFIG_IDF_TARGET="esp32p4"
+
+# --- Chip revision -----------------------------------------------------------
+# Most shipped Tab5 units carry pre-rev3.0 "ES" (engineering sample) ESP32-P4
+# silicon. Rev <3.0 and >=3.0 have incompatible memory layouts, so the target
+# has to be picked explicitly. If your unit is a production rev3.x part, DELETE
+# these two lines (a mismatch shows up as a boot loop right after the ROM log).
+CONFIG_ESP32P4_SELECTS_REV_LESS_V3=y
+CONFIG_ESP32P4_REV_MIN_0=y
+
+# --- Flash / partitions (16 MB on the Tab5) ---------------------------------
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# --- Over-the-air updates ----------------------------------------------------
+# A camera that has to be reached with a USB cable to be updated is a camera you
+# stop updating. With rollback enabled the bootloader marks a freshly flashed
+# image as "pending verify"; if it does not confirm itself the next boot returns
+# to the previous one, so a build that cannot start its web server cannot strand
+# the device.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# --- CPU / RTOS --------------------------------------------------------------
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_360=y
+CONFIG_FREERTOS_HZ=1000
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_COMPILER_OPTIMIZATION_PERF=y
+
+# --- PSRAM (32 MB) -----------------------------------------------------------
+# Frame buffers and JPEG buffers all live here. Small allocations stay internal
+# so the drivers keep their fast RAM.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_TRY_ALLOCATE_WIFI_LWIP=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+
+# --- Camera sensor -----------------------------------------------------------
+# The Tab5's SC2356 is the SC202CS in esp_cam_sensor. All sensor drivers default
+# to off; enabling this is what makes esp_video probe it and create /dev/video0.
+CONFIG_CAMERA_SC202CS=y
+CONFIG_CAMERA_SC202CS_DEFAULT_IPA_JSON_CONFIGURATION_FILE=y
+
+# The ISP pipeline controller runs auto-exposure / auto-white-balance against
+# the live ISP statistics. WITHOUT THIS the image is dark and green-tinted
+# (raw demosaic with no AE/AWB) — it is not optional in practice.
+CONFIG_ESP_VIDEO_ENABLE_ISP_PIPELINE_CONTROLLER=y
+CONFIG_ISP_PIPELINE_CONTROLLER_TASK_STACK_USE_PSRAM=y
+
+# =============================================================================
+# Wi-Fi via the on-board ESP32-C6 co-processor (ESP-Hosted + esp_wifi_remote).
+# The ESP32-P4 has no radio of its own.
+# =============================================================================
+# esp_hosted 3.x ships a board preset for the Tab5. Selecting it fills in the
+# whole SDIO mapping (slot 1, 4-bit, CMD=13 CLK=12 D0=11 D1=10 D2=9 D3=8, reset
+# on GPIO15) from the component's own board definition.
+#
+# Do NOT hand-write the pins here. esp_hosted 2.x used CONFIG_ESP_HOSTED_PRIV_
+# SDIO_PIN_* names that 3.x renamed; unknown symbols in sdkconfig.defaults are
+# silently ignored, so a stale pin block leaves the EV-board defaults in place
+# and the C6 never enumerates. Run ./check_sdkconfig.sh after changing anything
+# in this file.
+CONFIG_ESP_HOSTED_CP_TARGET_ESP32C6=y
+CONFIG_ESP32P4_TAB5_C6_BOARD=y
+
+# --- Wi-Fi / lwIP throughput tuning for a sustained MJPEG stream -------------
+CONFIG_WIFI_RMT_STATIC_RX_BUFFER_NUM=16
+CONFIG_WIFI_RMT_DYNAMIC_RX_BUFFER_NUM=64
+# esp_wifi_remote settles on STATIC TX buffers on this IDF, so the dynamic
+# count is not the knob to turn — raising the static pool is. (Preallocated
+# buffers suit a steady MJPEG stream anyway: no per-frame allocation.)
+CONFIG_WIFI_RMT_STATIC_TX_BUFFER_NUM=32
+CONFIG_WIFI_RMT_AMPDU_TX_ENABLED=y
+CONFIG_WIFI_RMT_TX_BA_WIN=32
+CONFIG_WIFI_RMT_AMPDU_RX_ENABLED=y
+CONFIG_WIFI_RMT_RX_BA_WIN=32
+CONFIG_LWIP_TCP_SND_BUF_DEFAULT=65534
+CONFIG_LWIP_TCP_WND_DEFAULT=65534
+CONFIG_LWIP_TCP_SACK_OUT=y
+CONFIG_LWIP_TCP_RECVMBOX_SIZE=64
+CONFIG_LWIP_UDP_RECVMBOX_SIZE=64
+CONFIG_LWIP_TCPIP_RECVMBOX_SIZE=64
+
+# Default LWIP_MAX_SOCKETS (10) runs out fast once a browser opens the page,
+# the stream and a favicon request at once.
+CONFIG_LWIP_MAX_SOCKETS=16
+CONFIG_LWIP_MAX_ACTIVE_TCP=24
+
+# --- FAT filesystem on the microSD card -------------------------------------
+# Clip names carry a timestamp, which does not fit 8.3. Without long filename
+# support the BSP warns at mount and the names are mangled.
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+
+# Deliberately left at the default OEM encoding. Switching this to UTF-8 with
+# codepage 932 to allow Japanese filenames made existing directory entries read
+# back inconsistently — files that had been deleted reappeared and others
+# vanished. Non-ASCII names on FAT are not worth that; names are normalised to
+# ASCII on the way in instead.
+
+# --- HTTP server -------------------------------------------------------------
+CONFIG_HTTPD_MAX_REQ_HDR_LEN=1024
+CONFIG_HTTPD_MAX_URI_LEN=512
+
+# --- LVGL (local status console on the 5" panel) -----------------------------
+CONFIG_LV_USE_QRCODE=y
+CONFIG_LV_FONT_MONTSERRAT_20=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_FONT_MONTSERRAT_48=y
